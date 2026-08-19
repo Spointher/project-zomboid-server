@@ -1,0 +1,10 @@
+#!/bin/bash
+# Admin console for the running server:
+#   docker exec -it project-zomboid-server pz-rcon players
+#   docker exec -it project-zomboid-server pz-rcon save
+#   docker exec -it project-zomboid-server pz-rcon servermsg "restarting in 5"
+#
+# PZ does not reliably bind RCON on 0.0.0.0, so use the container's own address.
+# hostname -i can return several addresses; take the first.
+ip="$(hostname -i)"
+exec rcon -a "${ip%% *}:${RCON_PORT:-27015}" -p "${RCON_PASSWORD}" "$@"

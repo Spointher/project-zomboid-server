@@ -1,0 +1,99 @@
+services:
+  project-zomboid:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: project-zomboid-server
+    restart: unless-stopped
+    # Two DIFFERENT knobs — do not collapse them:
+    #   PZ_HEAP   → -Xmx. Only the JVM heap: world, chunks, zombies.
+    #   mem_limit → hard ceiling for the WHOLE container: heap + JVM non-heap
+    #               (metaspace, code cache, ~1 thread per player, direct
+    #               buffers) + PZ native/tcmalloc + code-server. That overhead
+    #               is ~1.5 GB, so keep this ~1.5 GB above PZ_HEAP.
+    #
+    # AND — this is the part that froze the 6 GB VM — mem_limit must also stay
+    # ~1.5 GB BELOW the host's RAM. "At most the VM's RAM" is not a safety rule:
+    # 4608m of 6144m left the host ~1.5 GB for kernel + dockerd + sshd + page
+    # cache, PZ mmapped its way through that, and with no swap anywhere the
+    # kernel livelocked reclaiming instead of OOM-killing anything. The whole VM
+    # hung, SSH included. See the three-condition rule in .env.example.
+    # Defaults are sized for a 6 GB VM: 2g heap → 3.5g container → 2.5 GB host.
+    mem_limit: ${PZ_MEM_LIMIT:-3584m}
+    # Deliberately ABOVE mem_limit: the container gets ~1 GB of swap.
+    # This REVERSES the old "equal on purpose, fail fast instead of thrashing"
+    # setting. Failing fast is not what happened — with zero swap in the cgroup
+    # AND none on the host, the kernel had nowhere to evict anonymous pages, so
+    # it never reached a clean OOM and stalled the machine instead. A container
+    # that spills 1 GB to disk is slow; a VM you cannot SSH into is down.
+    # Requires host swap: run vm-hardening.sh on the VM once.
+    memswap_limit: ${PZ_MEMSWAP_LIMIT:-4608m}
+    # Keep at least one vCPU out of the container's reach. At boot the JVM sizes
+    # its GC/JIT pools to the visible CPU count and PZ streams chunks; with
+    # cpus == nproc, sshd stops getting scheduled and the VM looks frozen even
+    # when it is only busy.
+    cpus: ${PZ_CPUS:-3}
+    environment:
+      # Selects the profile (${SERVER_NAME}.ini) AND the saved world directory
+      # (Saves/Multiplayer/${SERVER_NAME}). Changing it on a running server
+      # starts an empty world — see .env.example.
+      SERVER_NAME: ${SERVER_NAME:-server}
+      # In-game admin account only. The web IDE login is CODE_SERVER_PASSWORD and
+      # the password players need to join is SERVER_PASSWORD — three separate
+      # secrets, see .env.example.
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env}
+      # Required even when ENABLE_CODE_SERVER is false, so that turning the IDE
+      # on is a one-flag change that can never leave :8443 unauthenticated.
+      CODE_SERVER_PASSWORD: ${CODE_SERVER_PASSWORD:?set CODE_SERVER_PASSWORD in .env}
+      # JVM heap only — the container ceiling is mem_limit above.
+      PZ_HEAP: ${PZ_HEAP:-2g}
+      # -Xms. Deliberately NOT equal to PZ_HEAP: -Xms == -Xmx makes the JVM
+      # commit the whole heap in the first second of boot, which is exactly the
+      # moment the VM was dying. Let it grow into memory instead.
+      PZ_HEAP_MIN: ${PZ_HEAP_MIN:-512m}
+      # code-server shares this container's cgroup and costs ~300-500 MB. Off by
+      # default so the memory budget goes to the game; turn it on when you need
+      # to edit the .ini, then turn it back off.
+      ENABLE_CODE_SERVER: ${ENABLE_CODE_SERVER:-false}
+      RCON_PASSWORD: ${RCON_PASSWORD:?set RCON_PASSWORD in .env}
+      RCON_PORT: ${RCON_PORT:-27015}
+      SERVER_PASSWORD: ${SERVER_PASSWORD:-}
+      PUBLIC_NAME: ${PUBLIC_NAME:-}
+      PUBLIC_DESCRIPTION: ${PUBLIC_DESCRIPTION:-}
+      # The game version lives in .env as PZ_BRANCH + PZ_AUTO_UPDATE (see
+      # .env.example). .env is gitignored and is NOT included in
+      # upload_to_server.sh's tar, so bumping the version on the VM means
+      # editing its .env by hand.
+      PZ_BRANCH: ${PZ_BRANCH:-}
+      PZ_AUTO_UPDATE: ${PZ_AUTO_UPDATE:-true}
+      # Mirrored into the container so start.sh can cap the JVM's
+      # -XX:ActiveProcessorCount to it: the JVM reads the host's CPU count, not
+      # the `cpus:` quota above.
+      PZ_CPUS: ${PZ_CPUS:-3}
+    # The ordered shutdown (warn → save → exit) can take a while on a large
+    # world. Docker SIGKILLs once this elapses.
+    stop_grace_period: 90s
+    # RCON (27015/tcp) is deliberately NOT published — use `docker exec` instead.
+    ports:
+      - "16261:16261/udp"
+      - "16262:16262/udp"
+      - "8443:8443/tcp"
+    volumes:
+      - zomboid-data:/home/pzuser/Zomboid
+      - pzserver-install:/opt/pzserver
+    healthcheck:
+      # The bracket trick keeps pgrep from matching the healthcheck's own `sh -c`
+      # process: that cmdline contains "[P]rojectZomboid64", which does not match
+      # the ERE. Without it the check returns 0 forever and reports the container
+      # healthy while the server is dead.
+      test: ["CMD-SHELL", "pgrep -f '[P]rojectZomboid64' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # The game is installed at runtime: a fresh volume downloads ~7 GB before
+      # the ProjectZomboid64 process exists.
+      start_period: 900s
+
+volumes:
+  zomboid-data:
+  pzserver-install:

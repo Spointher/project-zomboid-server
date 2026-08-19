@@ -1,0 +1,4 @@
+.idea
+server/.env
+*.local.json
+upload_to_server.sh
